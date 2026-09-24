@@ -72,7 +72,8 @@ adjust thresholds with `/agent listen tune`, then switch to `/agent listen mode 
 /agent mention <true|false>                     /agent repo <channel> <repo>
 /agent brief <repo> [notes]                     /agent budget [limits]
 /agent memory list|add|forget|clear             /agent show
-/agent listen add|remove <channel>              /agent listen mode <shadow|live>
+/agent listen add|remove <channel>              /agent listen all|off
+/agent listen mode <shadow|live>
 /agent listen tune [thresholds, cooldown, cap]  /agent listen stats [hours]
 /agent whoami   (anyone)
 ```

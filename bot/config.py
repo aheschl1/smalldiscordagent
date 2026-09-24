@@ -74,7 +74,9 @@ STATE_DEFAULTS = {
     "roles": {},             # role ID -> level
     "channel_repos": {},     # channel ID -> default repo
     # Unprompted replies (Jev triage) for messages that don't mention the bot
-    "listen_channels": [],   # channel IDs to watch; empty = off
+    "listen_channels": [],   # channel IDs to watch (when listen_all is off)
+    "listen_all": False,     # watch every channel the bot can see, except listen_exclude
+    "listen_exclude": [],
     "listen_mode": "shadow",  # shadow = classify + log only; live = reply / suggest tickets
     "listen_answer_at": 0.8,
     "listen_ticket_at": 0.85,
@@ -110,8 +112,10 @@ class StateStore:
         return not chans or str(channel_id) in chans or (parent_id is not None and str(parent_id) in chans)
 
     def listening(self, channel_id: int, parent_id: int | None = None) -> bool:
-        lc = self.s["listen_channels"]
-        return str(channel_id) in lc or (parent_id is not None and str(parent_id) in lc)
+        ids = {str(channel_id)} | ({str(parent_id)} if parent_id is not None else set())
+        if self.s["listen_all"]:
+            return not ids & set(self.s["listen_exclude"])
+        return bool(ids & set(self.s["listen_channels"]))
 
     def repo_for(self, channel_id: int, parent_id: int | None, default: str) -> str:
         cr = self.s["channel_repos"]

@@ -181,20 +181,42 @@ def build_commands(bot: Bot) -> app_commands.Group:
     listen = app_commands.Group(name="listen", description="Unprompted replies to messages that don't mention the bot",
                                 parent=agent)
 
+    def key_note() -> str:
+        return "" if triage.enabled() else " (TYPESAFE_API_KEY isn't set, so nothing will happen yet)"
+
     @listen.command(name="add", description="Watch a channel for questions/tickets without a mention")
     async def listen_add(inter: discord.Interaction, channel: discord.TextChannel):
         if await owner(inter):
-            if str(channel.id) not in st.s["listen_channels"]:
-                st.s["listen_channels"].append(str(channel.id))
-            key = "" if triage.enabled() else " (TYPESAFE_API_KEY isn't set, so nothing will happen yet)"
-            await done(inter, f"Watching {channel.mention} in **{st.s['listen_mode']}** mode.{key}")
+            cid = str(channel.id)
+            if st.s["listen_all"]:
+                if cid in st.s["listen_exclude"]:
+                    st.s["listen_exclude"].remove(cid)
+            elif cid not in st.s["listen_channels"]:
+                st.s["listen_channels"].append(cid)
+            await done(inter, f"Watching {channel.mention} in **{st.s['listen_mode']}** mode.{key_note()}")
 
-    @listen.command(name="remove", description="Stop watching a channel")
+    @listen.command(name="remove", description="Stop watching a channel (excludes it when watching all)")
     async def listen_remove(inter: discord.Interaction, channel: discord.TextChannel):
         if await owner(inter):
-            if str(channel.id) in st.s["listen_channels"]:
-                st.s["listen_channels"].remove(str(channel.id))
+            cid = str(channel.id)
+            if st.s["listen_all"]:
+                if cid not in st.s["listen_exclude"]:
+                    st.s["listen_exclude"].append(cid)
+            elif cid in st.s["listen_channels"]:
+                st.s["listen_channels"].remove(cid)
             await done(inter, f"Stopped watching {channel.mention}.")
+
+    @listen.command(name="all", description="Watch every channel the bot can see (use remove to exclude some)")
+    async def listen_all(inter: discord.Interaction):
+        if await owner(inter):
+            st.s["listen_all"] = True
+            await done(inter, f"Watching **all channels** in **{st.s['listen_mode']}** mode.{key_note()}")
+
+    @listen.command(name="off", description="Stop watching all channels")
+    async def listen_off(inter: discord.Interaction):
+        if await owner(inter):
+            st.s["listen_all"], st.s["listen_channels"], st.s["listen_exclude"] = False, [], []
+            await done(inter, "Not watching any channels.")
 
     @listen.command(name="mode", description="shadow: classify and log only · live: actually reply / suggest tickets")
     async def listen_mode(inter: discord.Interaction, mode: Literal["shadow", "live"]):
@@ -223,7 +245,11 @@ def build_commands(bot: Bot) -> app_commands.Group:
         counts: dict[str, int] = {}
         for r in rows:
             counts[r["decision"]] = counts.get(r["decision"], 0) + 1
-        chans = ", ".join(f"<#{c}>" for c in st.s["listen_channels"]) or "none"
+        if st.s["listen_all"]:
+            ex = ", ".join(f"<#{c}>" for c in st.s["listen_exclude"])
+            chans = "all channels" + (f" except {ex}" if ex else "")
+        else:
+            chans = ", ".join(f"<#{c}>" for c in st.s["listen_channels"]) or "none"
         lines = [f"**{len(rows)}** messages in {hours}h · mode **{st.s['listen_mode']}** · watching {chans}",
                  " · ".join(f"{k}: {v}" for k, v in sorted(counts.items()))]
         picks = [r for r in rows if r["decision"] != "ignore"][-6:]
