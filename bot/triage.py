@@ -31,7 +31,8 @@ QUESTIONS = {
         "instructions": "What should the project's code assistant bot do about the LATEST message?",
         "criteria": {
             "answer": "It asks a technical question about the project's code, build, tooling, errors, tests or CI "
-                      "that someone could answer by reading the repository or CI logs, and it isn't answered yet",
+                      "that someone could answer by reading the repository or CI logs, and it isn't answered yet."
+                      "Or, they directly reference the bot or 'computa' which is the bots name",
             "ticket": "It reports a bug, requests a feature, or describes work that should be tracked as a ticket, "
                       "and nobody has said it's already tracked or fixed",
             "ignore": "Anything else: chit-chat, jokes, logistics, scheduling, opinions, thanks, status updates, "
