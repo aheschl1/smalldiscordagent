@@ -50,6 +50,20 @@ recurring gotchas) on its own. They're added to every later prompt, either for a
 capped at about 2,000 characters per scope, so the agent merges or forgets old ones as it goes. Manage them with
 `/agent memory list|add|forget|clear`.
 
+## Jumping in without a mention (optional)
+
+With `TYPESAFE_API_KEY` set, the bot can watch channels you pick. Each message that doesn't mention it is scored by
+[Jev](https://docs.typesafe.ai/), a fast classifier that costs about $0.00002 per message:
+
+- **Technical question:** Computa replies in the channel, with no thread. It uses read-only tools and stays quiet if
+  it has nothing useful to add.
+- **Bug or task worth tracking:** it offers to file a Linear ticket with **Create / Dismiss** buttons, and never
+  files one on its own.
+- Anyone can react ❌ to delete an unprompted reply. There's a per-channel cooldown and a daily cap.
+
+It starts in **shadow** mode, which scores and logs but posts nothing. Check `/agent listen stats` for a few days,
+adjust thresholds with `/agent listen tune`, then switch to `/agent listen mode live`.
+
 ## Owner commands
 
 ```
@@ -58,6 +72,8 @@ capped at about 2,000 characters per scope, so the agent merges or forgets old o
 /agent mention <true|false>                     /agent repo <channel> <repo>
 /agent brief <repo> [notes]                     /agent budget [limits]
 /agent memory list|add|forget|clear             /agent show
+/agent listen add|remove <channel>              /agent listen mode <shadow|live>
+/agent listen tune [thresholds, cooldown, cap]  /agent listen stats [hours]
 /agent whoami   (anyone)
 ```
 

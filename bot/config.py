@@ -73,6 +73,13 @@ STATE_DEFAULTS = {
     "users": {},             # user ID -> level
     "roles": {},             # role ID -> level
     "channel_repos": {},     # channel ID -> default repo
+    # Unprompted replies (Jev triage) for messages that don't mention the bot
+    "listen_channels": [],   # channel IDs to watch; empty = off
+    "listen_mode": "shadow",  # shadow = classify + log only; live = reply / suggest tickets
+    "listen_answer_at": 0.8,
+    "listen_ticket_at": 0.85,
+    "listen_cooldown_s": 600,  # min seconds between unprompted replies per channel
+    "listen_daily_max": 40,   # unprompted agent runs per UTC day
 }
 
 
@@ -101,6 +108,10 @@ class StateStore:
     def channel_allowed(self, channel_id: int, parent_id: int | None = None) -> bool:
         chans = self.s["channels"]
         return not chans or str(channel_id) in chans or (parent_id is not None and str(parent_id) in chans)
+
+    def listening(self, channel_id: int, parent_id: int | None = None) -> bool:
+        lc = self.s["listen_channels"]
+        return str(channel_id) in lc or (parent_id is not None and str(parent_id) in lc)
 
     def repo_for(self, channel_id: int, parent_id: int | None, default: str) -> str:
         cr = self.s["channel_repos"]

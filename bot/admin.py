@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 import discord
 from discord import app_commands
 
-from . import memory
+from . import memory, triage
 from .brief import invalidate, notes_path
 
 if TYPE_CHECKING:
@@ -178,6 +178,65 @@ def build_commands(bot: Bot) -> app_commands.Group:
         if await owner(inter):
             await inter.response.send_message(f"Cleared {memory.clear(everything=True)} memories.")
 
+    listen = app_commands.Group(name="listen", description="Unprompted replies to messages that don't mention the bot",
+                                parent=agent)
+
+    @listen.command(name="add", description="Watch a channel for questions/tickets without a mention")
+    async def listen_add(inter: discord.Interaction, channel: discord.TextChannel):
+        if await owner(inter):
+            if str(channel.id) not in st.s["listen_channels"]:
+                st.s["listen_channels"].append(str(channel.id))
+            key = "" if triage.enabled() else " (TYPESAFE_API_KEY isn't set, so nothing will happen yet)"
+            await done(inter, f"Watching {channel.mention} in **{st.s['listen_mode']}** mode.{key}")
+
+    @listen.command(name="remove", description="Stop watching a channel")
+    async def listen_remove(inter: discord.Interaction, channel: discord.TextChannel):
+        if await owner(inter):
+            if str(channel.id) in st.s["listen_channels"]:
+                st.s["listen_channels"].remove(str(channel.id))
+            await done(inter, f"Stopped watching {channel.mention}.")
+
+    @listen.command(name="mode", description="shadow: classify and log only · live: actually reply / suggest tickets")
+    async def listen_mode(inter: discord.Interaction, mode: Literal["shadow", "live"]):
+        if await owner(inter):
+            st.s["listen_mode"] = mode
+            await done(inter, f"Listen mode → **{mode}**")
+
+    @listen.command(name="tune", description="Set thresholds (0-1), cooldown (seconds) and daily cap")
+    async def listen_tune(inter: discord.Interaction, answer_at: float | None = None, ticket_at: float | None = None,
+                          cooldown_s: int | None = None, daily_max: int | None = None):
+        if await owner(inter):
+            for k, v in {"listen_answer_at": answer_at, "listen_ticket_at": ticket_at,
+                         "listen_cooldown_s": cooldown_s, "listen_daily_max": daily_max}.items():
+                if v is not None:
+                    st.s[k] = v
+            await done(inter, f"answer ≥ {st.s['listen_answer_at']} · ticket ≥ {st.s['listen_ticket_at']} · "
+                              f"cooldown {st.s['listen_cooldown_s']}s/channel · max {st.s['listen_daily_max']}/day")
+
+    @listen.command(name="stats", description="What triage decided recently")
+    async def listen_stats(inter: discord.Interaction, hours: int = 24):
+        if not await owner(inter):
+            return
+        rows = bot.triage_log.recent(hours)
+        if not rows:
+            return await inter.response.send_message(f"No triaged messages in the last {hours}h.")
+        counts: dict[str, int] = {}
+        for r in rows:
+            counts[r["decision"]] = counts.get(r["decision"], 0) + 1
+        chans = ", ".join(f"<#{c}>" for c in st.s["listen_channels"]) or "none"
+        lines = [f"**{len(rows)}** messages in {hours}h · mode **{st.s['listen_mode']}** · watching {chans}",
+                 " · ".join(f"{k}: {v}" for k, v in sorted(counts.items()))]
+        picks = [r for r in rows if r["decision"] != "ignore"][-6:]
+        near = sorted((r for r in rows if r["decision"] == "ignore" and r.get("reason") == "below threshold"),
+                      key=lambda r: -max(r["probs"].get("answer", 0), r["probs"].get("ticket", 0)))[:3]
+        if picks:
+            lines.append("\n**Would act / acted on:**")
+            lines += [_row(r) for r in picks]
+        if near:
+            lines.append("\n**Closest misses:**")
+            lines += [_row(r) for r in near]
+        await inter.response.send_message("\n".join(lines)[:1990])
+
     @agent.command(name="show", description="Show current settings")
     async def show(inter: discord.Interaction):
         if await owner(inter):
@@ -186,6 +245,12 @@ def build_commands(bot: Bot) -> app_commands.Group:
                                               f"Repos: {', '.join(cfg.repos)} · model `{cfg.model}`")
 
     return agent
+
+
+def _row(r: dict) -> str:
+    p = r["probs"]
+    return (f"-# answer {p.get('answer', 0):.2f} · ticket {p.get('ticket', 0):.2f} · {r['acted']}\n"
+            f"> {r['author']}: {r['content'][:150]}")
 
 
 def _chans(st) -> str:
