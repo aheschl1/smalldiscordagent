@@ -45,9 +45,10 @@ def build_commands(bot: Bot) -> app_commands.Group:
     async def whoami(inter: discord.Interaction):
         roles = [r.id for r in getattr(inter.user, "roles", [])]
         spent = bot.agent.ledger.today()["users"].get(str(inter.user.id), 0.0)
+        cap = cfg.budget.user_daily_usd
+        pct = min(100, round(spent / cap * 100)) if cap > 0 else 0
         await inter.response.send_message(
-            f"Your level: **{st.level_for(inter.user.id, roles)}** · today's usage ${spent:.2f} / "
-            f"${cfg.budget.user_daily_usd:.2f}")
+            f"Your level: **{st.level_for(inter.user.id, roles)}** · {pct}% of today's budget used")
 
     @perm.command(name="user", description="Set a user's level (overrides their roles)")
     async def perm_user(inter: discord.Interaction, user: discord.User, level: Level):
