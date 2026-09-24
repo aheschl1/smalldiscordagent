@@ -1,0 +1,6 @@
+node_modules/
+.env
+data/
+config.toml
+.venv/
+__pycache__/

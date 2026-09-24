@@ -1,0 +1,31 @@
+# Repos the bot may read (and, for write users, open PRs against). First one is the default.
+repos = ["owner/name"]
+
+# gpt-6-sol: $2 in / $0.20 cached / $10 out per 1M tokens. Falls back to the cheap model near the daily cap.
+model = "gpt-6-sol"
+fallback_model = "gpt-6-luna"
+reasoning_effort = "medium"   # minimal | low | medium | high; remove to use the model default
+
+max_steps = 30          # tool-call rounds per request
+max_tool_output = 8000  # chars per tool result sent to the model
+history_turns = 6       # prior Q/A pairs kept per Discord thread (answers only, no tool traces)
+draft_prs = false
+show_usage = false      # true adds a footer with tokens and cost to Discord replies (always logged)
+data_dir = "data"
+
+# ~$2500 over ~2.5 months. Tracked in data/usage.json (UTC days).
+[budget]
+daily_usd = 30
+monthly_usd = 900
+user_daily_usd = 5
+request_usd = 1.5     # past this, the agent must answer without more tools
+fallback_at = 0.8     # fraction of the daily budget after which fallback_model is used
+
+# USD per 1M tokens: [input, cached input, output]
+[prices]
+"gpt-6-sol" = [2.0, 0.2, 10.0]
+"gpt-6-luna" = [0.1, 0.01, 0.5]
+"gpt-6-astra" = [10.0, 1.0, 50.0]
+"gpt-5.5" = [5.0, 0.5, 30.0]
+"gpt-5.4" = [2.5, 0.25, 15.0]
+"gpt-5.4-mini" = [0.75, 0.075, 4.5]

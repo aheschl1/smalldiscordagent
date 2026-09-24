@@ -1,0 +1,14 @@
+[project]
+name = "repo-agent-bot"
+version = "0.1.0"
+description = "Discord bot: thin agent harness for answering questions, debugging, reviewing and opening small PRs on GitHub repos"
+requires-python = ">=3.11"
+dependencies = [
+  "discord.py>=2.4",
+  "openai>=1.60",
+  "httpx>=0.27",
+  "python-dotenv>=1.0",
+]
+
+[tool.ruff]
+line-length = 120
