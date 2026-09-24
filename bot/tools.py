@@ -29,6 +29,10 @@ class ToolCtx:
     requester: str
     draft_prs: bool
     origin: str = ""  # link back to where the request came from (Discord thread URL)
+    level: str = "read"
+    user_id: int = 0
+    # Asks the requesting user to approve a dangerous action (Discord button). None = can't ask, so deny.
+    confirm: Callable[[str], Awaitable[bool]] | None = None
 
 
 Impl = Callable[[dict, ToolCtx], Awaitable[str]]
@@ -37,6 +41,8 @@ _WRITE: list[tuple[dict, Impl]] = []
 
 REPO = {"repo": {"type": "string", "description": "owner/name; omit for default"}}
 REF = {"ref": {"type": "string", "description": "branch, tag, sha, or pr/N; omit for default branch"}}
+BASE = {"base": {"type": "string", "description": "branch to start from and target with the PR; first edit only; "
+                                                  "default: default branch"}}
 
 
 def tool(registry: list, name: str, desc: str, props: dict, required: tuple[str, ...] = ()):
@@ -207,13 +213,17 @@ async def _ci(a, c):
 async def worktree_for(c: ToolCtx, a: dict) -> Worktree:
     r = repo_of(c, a)
     if r.name not in c.worktrees:
-        base = c.pinned.get(r.name) or await r.resolve()
-        c.worktrees[r.name] = await r.add_worktree(base)
+        branch = (a.get("base") or "").strip()
+        if branch and branch != r.default_branch:
+            sha = await r.resolve(branch)
+        else:
+            branch, sha = "", c.pinned.get(r.name) or await r.resolve()
+        c.worktrees[r.name] = await r.add_worktree(sha, branch)
     return c.worktrees[r.name]
 
 
 @tool(_WRITE, "edit", "Replace an exact, unique string in a file. Include enough context to be unique.",
-      {**REPO, "path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}},
+      {**REPO, "path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}, **BASE},
       ("path", "old", "new"))
 async def _edit(a, c):
     wt = await worktree_for(c, a)
@@ -230,7 +240,7 @@ async def _edit(a, c):
 
 
 @tool(_WRITE, "write", "Create or overwrite a file with full content.",
-      {**REPO, "path": {"type": "string"}, "content": {"type": "string"}}, ("path", "content"))
+      {**REPO, "path": {"type": "string"}, "content": {"type": "string"}, **BASE}, ("path", "content"))
 async def _write(a, c):
     wt = await worktree_for(c, a)
     p = safe_path(wt.dir, a["path"])
@@ -256,7 +266,7 @@ async def _open_pr(a, c):
     if wt.pr:
         return f"pushed to existing PR {wt.pr[1]}\n{stat}"
     body = f"{a['body']}\n\n---\n_Requested by {c.requester} via Discord._"
-    pr = await gh.create_pr(r.name, a["title"], body, wt.branch, r.default_branch, c.draft_prs)
+    pr = await gh.create_pr(r.name, a["title"], body, wt.branch, wt.base or r.default_branch, c.draft_prs)
     wt.pr = (pr["number"], pr["html_url"])
     return f"opened {pr['html_url']}\n{stat}"
 
@@ -269,8 +279,13 @@ async def _review(a, c):
 
 # ---------------------------------------------------------------- registry
 
-def toolset(write: bool) -> tuple[list[dict], dict[str, Impl]]:
-    items = (_READ + _WRITE if write else _READ) + linear.tools(write)
+def toolset(level: str, repos: list[str] | None = None) -> tuple[list[dict], dict[str, Impl]]:
+    """Tools offered at a permission level. The model never sees tools above the user's level."""
+    from . import apis, memory  # late import: both modules use helpers from here
+    write = level == "write"
+    items = (_READ + _WRITE if write else _READ) + linear.tools(write) + apis.tools(repos or [])
+    if write:
+        items += memory.tools()
     return [s for s, _ in items], {s["name"]: f for s, f in items}
 
 

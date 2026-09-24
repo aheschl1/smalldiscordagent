@@ -166,7 +166,8 @@ class Bot(discord.Client):
                                              user_name=msg.author.display_name, level=level, repo=repo,
                                              on_progress=progress,
                                              extra_tools=[history_tool(msg, target, skip={msg.id, status.id})],
-                                             origin=getattr(target, "jump_url", msg.jump_url))
+                                             origin=getattr(target, "jump_url", msg.jump_url),
+                                             confirm=lambda summary: ask_confirm(target, msg.author, summary))
             text = reply.text + (f"\n-# {reply.footer}" if reply.footer else "")
         except Exception as e:  # surface failures in-channel rather than going silent
             log.exception("agent failed")
@@ -176,6 +177,52 @@ class Bot(discord.Client):
         await status.edit(content=parts[0])
         for p in parts[1:]:
             await target.send(p)
+
+
+CONFIRM_TIMEOUT_S = 300
+
+
+class ConfirmView(discord.ui.View):
+    """Confirm/Cancel buttons that only the requesting user can press."""
+
+    def __init__(self, user: discord.abc.User):
+        super().__init__(timeout=CONFIRM_TIMEOUT_S)
+        self.user = user
+        self.approved = False
+
+    async def interaction_check(self, inter: discord.Interaction) -> bool:
+        if inter.user.id != self.user.id:
+            await inter.response.send_message(f"Only {self.user.display_name} can confirm this.", ephemeral=True)
+            return False
+        return True
+
+    async def _finish(self, inter: discord.Interaction, approved: bool) -> None:
+        self.approved = approved
+        verdict = f"**Confirmed** by {inter.user.display_name}" if approved else f"**Cancelled** by {inter.user.display_name}"
+        await inter.response.edit_message(content=f"{inter.message.content}\n{verdict}", view=None)
+        self.stop()
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
+    async def confirm(self, inter: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self._finish(inter, True)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, inter: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self._finish(inter, False)
+
+
+async def ask_confirm(target: discord.abc.Messageable, user: discord.abc.User, summary: str) -> bool:
+    view = ConfirmView(user)
+    text = f"{user.mention}, the agent wants to run this. Confirm?\n{summary}"
+    prompt = await target.send(text[:1990], view=view,
+                               allowed_mentions=discord.AllowedMentions(users=[user]))
+    timed_out = await view.wait()
+    if timed_out:
+        try:
+            await prompt.edit(content=f"{prompt.content}\n**Timed out**; not run.", view=None)
+        except discord.HTTPException:
+            pass
+    return view.approved
 
 
 HISTORY_SCHEMA = {

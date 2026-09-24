@@ -59,6 +59,7 @@ class Worktree:
     branch: str
     tree: str                       # snapshot of the index after the last edit; used for reads
     pr: tuple[int, str] | None = None  # (number, url)
+    base: str = ""                  # branch the work started from and the PR targets ("" = default branch)
 
 
 class Repo:
@@ -130,14 +131,14 @@ class Repo:
             args += ["--", path]
         return await self._g(*args)
 
-    async def add_worktree(self, base: str) -> Worktree:
+    async def add_worktree(self, base: str, base_branch: str = "") -> Worktree:
         wid = secrets.token_hex(3)
         branch = f"bot/{date.today().isoformat()}-{wid}"
         d = self.data_dir / "wt" / self.slug / wid
         async with self.lock:
             await self._g("worktree", "add", "-q", "-b", branch, str(d), base)
         tree = (await git("rev-parse", "HEAD^{tree}", cwd=d)).strip()
-        return Worktree(d, branch, tree)
+        return Worktree(d, branch, tree, base=base_branch)
 
     async def remove_worktree(self, wt: Worktree) -> None:
         async with self.lock:

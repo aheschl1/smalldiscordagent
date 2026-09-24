@@ -15,6 +15,7 @@ from pathlib import Path
 from openai import AsyncOpenAI
 
 from . import github as gh
+from . import memory
 from .brief import get_brief
 from .config import Config
 from .gitrepo import Repo, Worktree
@@ -55,11 +56,18 @@ changes, not style. Be specific with path:line. Summarize with a clear verdict.
 MODE_WRITE = """
 Write access: you may make small, focused changes. Keep diffs minimal and match existing style; `edit` then \
 `open_pr` with a clear title and a body explaining what and why. Follow-up edits in this thread go to the same PR. \
-Only use `review` to post to GitHub when the user explicitly asks."""
+Only use `review` to post to GitHub when the user explicitly asks.
+Use `github_api` / `linear_graphql` for anything the specific tools don't cover. Destructive calls (merge, close, \
+delete, settings, releases) pause for the user to click Confirm; state exactly what you'll do first.
+Memory: when you learn a durable fact worth knowing in future chats (a team convention or preference, a decision, \
+who owns what, a recurring gotcha), save it with `remember` without being asked; one short fact per memory, repo \
+scope unless it's team-wide. Don't save one-off details, secrets, or what's obvious from the code. If a memory \
+below is wrong or outdated, `forget` it (and re-save a corrected version)."""
 
 MODE_READ = """
 Read-only: this user cannot have you edit files, open PRs, or post GitHub reviews. If they ask, you can still \
-review/propose the change in chat, and tell them write access is needed to apply it."""
+review/propose the change in chat, and tell them write access is needed to apply it. You can still read GitHub \
+and Linear with `github_api` (GET) / `linear_graphql` (queries)."""
 
 
 # ---------------------------------------------------------------- budget ledger
@@ -109,13 +117,14 @@ class Session:
     def to_json(self) -> dict:
         return {
             "history": self.history, "meta": self.meta, "last_used": self.last_used,
-            "worktrees": {r: {"dir": str(w.dir), "branch": w.branch, "tree": w.tree, "pr": w.pr}
+            "worktrees": {r: {"dir": str(w.dir), "branch": w.branch, "tree": w.tree, "pr": w.pr, "base": w.base}
                           for r, w in self.worktrees.items()},
         }
 
     @classmethod
     def from_json(cls, key: str, d: dict) -> Session:
-        wts = {r: Worktree(Path(w["dir"]), w["branch"], w["tree"], tuple(w["pr"]) if w.get("pr") else None)
+        wts = {r: Worktree(Path(w["dir"]), w["branch"], w["tree"], tuple(w["pr"]) if w.get("pr") else None,
+                           w.get("base", ""))
                for r, w in d.get("worktrees", {}).items() if Path(w["dir"]).is_dir()}
         return cls(key, [tuple(h) for h in d.get("history", [])], wts, d.get("meta", {}),
                    d.get("last_used", time.time()))
@@ -165,6 +174,7 @@ class Reply:
 
 
 Progress = Callable[[str], Awaitable[None]]
+Confirm = Callable[[str], Awaitable[bool]]
 
 
 class Agent:
@@ -174,6 +184,7 @@ class Agent:
         self.repos = {name: Repo(name, cfg.data_dir) for name in cfg.repos}
         self.sessions = SessionStore(cfg.data_dir)
         self.ledger = Ledger(cfg.data_dir)
+        memory.configure(cfg.data_dir)
 
     async def start(self) -> None:
         results = await asyncio.gather(*(r.init() for r in self.repos.values()), return_exceptions=True)
@@ -252,8 +263,10 @@ class Agent:
     # -- the turn
 
     async def run(self, *, key: str, question: str, user_id: int, user_name: str, level: str, repo: str,
-                  on_progress: Progress | None = None, extra_tools: list | None = None, origin: str = "") -> Reply:
-        """extra_tools: [(schema, impl)] supplied by the caller, e.g. Discord history for this channel."""
+                  on_progress: Progress | None = None, extra_tools: list | None = None, origin: str = "",
+                  confirm: Confirm | None = None) -> Reply:
+        """extra_tools: [(schema, impl)] supplied by the caller, e.g. Discord history for this channel.
+        confirm: asks the requesting user to approve a destructive action; without it those are refused."""
         model, why = self.pick_model(user_id)
         if not model:
             return Reply(why)
@@ -262,13 +275,14 @@ class Agent:
             s.last_used = time.time()
             try:
                 return await self._turn(s, model, question, user_id, user_name, level, repo, on_progress,
-                                        extra_tools or [], origin)
+                                        extra_tools or [], origin, confirm)
             finally:
                 s.last_used = time.time()
                 self.sessions.save(s)
 
     async def _turn(self, s: Session, model: str, question: str, user_id: int, user_name: str, level: str,
-                    repo_name: str, on_progress: Progress | None, extra_tools: list, origin: str) -> Reply:
+                    repo_name: str, on_progress: Progress | None, extra_tools: list, origin: str,
+                    confirm: Confirm | None) -> Reply:
         cfg = self.cfg
         write = level == "write"
         await self._drop_worktrees(s, only_closed=True)  # PR merged/closed -> next edit starts fresh
@@ -279,6 +293,7 @@ class Agent:
         brief = await get_brief(repo, pinned[repo.name], cfg.data_dir)
 
         system = SYSTEM.format(repos=", ".join(cfg.repos), default=repo.name, brief=brief)
+        system += memory.render(repo.name)
         system += MODE_WRITE if write else MODE_READ
         items: list[dict] = []
         for q, a in s.history[-cfg.history_turns:]:
@@ -286,11 +301,11 @@ class Agent:
         asked = f"[{user_name}] {question}"
         items.append({"role": "user", "content": asked})
 
-        defs, impls = toolset(write)
+        defs, impls = toolset(level, cfg.repos)
         defs = defs + [schema for schema, _ in extra_tools]
         impls = {**impls, **{schema["name"]: fn for schema, fn in extra_tools}}
         ctx = ToolCtx(self.repos, repo.name, s.worktrees, pinned, cfg.max_tool_output, user_name, cfg.draft_prs,
-                      origin)
+                      origin, level, user_id, confirm)
         tok_in = tok_cached = tok_out = 0
         usd = 0.0
         text = ""

@@ -7,8 +7,8 @@ PRs, and search Discord and Linear for context.
 
 1. **Discord:** create an app at <https://discord.com/developers/applications>. Under **Bot**, copy the token and
    enable **Message Content Intent**. Invite it with the `bot` and `applications.commands` scopes.
-2. **GitHub:** create a fine-grained token for your repos with Contents and Pull requests (read/write), plus Checks
-   and Actions (read).
+2. **GitHub:** create a fine-grained token for your repos. For full use it needs Contents, Pull requests, Issues,
+   Actions and Administration (read/write), plus Checks (read). Grant less and the bot can do less.
 3. **Configure:**
    ```bash
    cp .env.example .env                 # tokens + OWNER_ID (your Discord user ID)
@@ -35,11 +35,20 @@ Mention the bot to start a thread: `@Computa why does the replay viewer crash?`
 | Level | Can |
 | --- | --- |
 | `none` | nothing |
-| `read` (default) | ask questions, debug, review in chat, read Discord history, search/create/comment Linear tickets |
-| `write` | also edit code, open PRs, post GitHub reviews, update Linear tickets |
+| `read` (default) | ask questions, debug, review in chat, read Discord/GitHub/Linear, create and comment on Linear tickets |
+| `write` | also edit code, open PRs, make any GitHub or Linear change, and have the agent save memories |
 
-Owners (`OWNER_ID`) always have `write`. A read user is never given the write tools. The bot has no shell, never
-merges, and posts reviews as comments only.
+Owners (`OWNER_ID`) always have `write`. A read user is never given the write tools, and the bot has no shell.
+**Destructive actions** (merge, close, delete, settings, releases, workflow runs, Linear deletes and archives) show
+the exact call with **Confirm / Cancel** buttons. Only the person who asked can click them, and nothing runs until
+they do.
+
+## Memories
+
+While talking with a write user, the agent saves lasting facts (team conventions, decisions, who owns what,
+recurring gotchas) on its own. They're added to every later prompt, either for all repos or just for one. They're
+capped at about 2,000 characters per scope, so the agent merges or forgets old ones as it goes. Manage them with
+`/agent memory list|add|forget|clear`.
 
 ## Owner commands
 
@@ -48,7 +57,8 @@ merges, and posts reviews as comments only.
 /agent channel add|remove <channel>             /agent channel all
 /agent mention <true|false>                     /agent repo <channel> <repo>
 /agent brief <repo> [notes]                     /agent budget [limits]
-/agent show                                     /agent whoami   (anyone)
+/agent memory list|add|forget|clear             /agent show
+/agent whoami   (anyone)
 ```
 
 `/agent brief` notes are added to the start of every prompt for that repo. Good notes (architecture, where things

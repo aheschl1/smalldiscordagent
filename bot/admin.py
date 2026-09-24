@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal
 import discord
 from discord import app_commands
 
+from . import memory
 from .brief import invalidate, notes_path
 
 if TYPE_CHECKING:
@@ -148,6 +149,34 @@ def build_commands(bot: Bot) -> app_commands.Group:
                    f"{b.fallback_at:.0%}) · month ${led.month():.2f} / ${b.monthly_usd:.2f}\n"
                    f"Per user/day ${b.user_daily_usd:.2f} · per request ${b.request_usd:.2f}\n"
                    + ("Top today: " + ", ".join(f"<@{u}> ${v:.2f}" for u, v in top) if top else ""))
+
+    mem = app_commands.Group(name="memory", description="The agent's saved memories", parent=agent)
+
+    @mem.command(name="list", description="Show saved memories")
+    async def mem_list(inter: discord.Interaction):
+        if await owner(inter):
+            items = memory.all_items()
+            text = "\n".join(f"`{m['id']}` [{scope}] {m['text']} ({m['by']}, {m['at']})" for scope, m in items)
+            await inter.response.send_message((text or "No memories yet.")[:1990])
+
+    @mem.command(name="forget", description="Delete a memory by id (e.g. m4)")
+    async def mem_forget(inter: discord.Interaction, memory_id: str):
+        if await owner(inter):
+            ok = memory.forget(memory_id.strip())
+            await inter.response.send_message(f"Forgot `{memory_id}`." if ok else f"No memory `{memory_id}`.")
+
+    @mem.command(name="add", description="Save a memory yourself")
+    @app_commands.autocomplete(repo=repo_autocomplete)
+    async def mem_add(inter: discord.Interaction, text: str, repo: str | None = None):
+        if await owner(inter):
+            if repo and repo not in cfg.repos:
+                return await inter.response.send_message("Unknown repo.")
+            await inter.response.send_message(memory.add(text, repo, inter.user.display_name))
+
+    @mem.command(name="clear", description="Delete all memories")
+    async def mem_clear(inter: discord.Interaction):
+        if await owner(inter):
+            await inter.response.send_message(f"Cleared {memory.clear(everything=True)} memories.")
 
     @agent.command(name="show", description="Show current settings")
     async def show(inter: discord.Interaction):
