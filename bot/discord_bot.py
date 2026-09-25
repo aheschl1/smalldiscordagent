@@ -11,7 +11,7 @@ from collections import deque
 import discord
 from discord import app_commands
 
-from . import linear, triage
+from . import artifacts, linear, triage
 from .admin import build_commands
 from .agent import Agent
 from .config import Config, StateStore
@@ -47,6 +47,30 @@ def _append(out: list[str], cur: str, line: str, fence: str, limit: int) -> tupl
     if line.strip().startswith("```"):
         fence = "" if fence else line.strip()
     return cur, fence
+
+
+TEXT_EXTS = (".txt", ".log")
+MAX_ATTACH_BYTES = 10_000_000  # skip downloading anything bigger
+
+
+async def read_attachments(m: discord.Message) -> str:
+    """Save .txt/.log attachments as artifacts and reference them by id; list anything else as unreadable."""
+    out: list[str] = []
+    for a in m.attachments:
+        ctype = (a.content_type or "").split(";")[0]
+        if not (a.filename.lower().endswith(TEXT_EXTS) or ctype == "text/plain"):
+            out.append(f"(attachment {a.filename}: not readable)")
+            continue
+        if a.size > MAX_ATTACH_BYTES:
+            out.append(f"(attachment {a.filename}: {a.size} bytes, too large to read)")
+            continue
+        try:
+            aid, meta = artifacts.save(await a.read(), a.filename, m.author.display_name, m.jump_url)
+        except discord.HTTPException as e:
+            out.append(f"(attachment {a.filename}: download failed: {e})")
+            continue
+        out.append(f"(attachment {a.filename}: artifact id={aid}, {meta['lines']} lines, {meta['bytes']} bytes)")
+    return "".join("\n" + s for s in out)
 
 
 def unprompted_question(ctx: str, text: str) -> str:
@@ -135,18 +159,19 @@ class Bot(discord.Client):
             return
 
         question = re.sub(rf"<@!?{self.user.id}>", "", msg.content).strip()
-        if not question:
+        if not question and not msg.attachments:
             if mentioned:
                 await msg.reply("Ask me something about the code.", mention_author=False)
             return
-        if msg.attachments:
-            question += "\n(attachments: " + ", ".join(a.filename for a in msg.attachments) + " — not readable)"
+        title = question or msg.attachments[0].filename
+        question = (question or "(see attached file)") + await read_attachments(msg)
         # Replying to someone's message (e.g. a pasted stack trace) brings it in as context.
         if msg.reference and msg.reference.message_id:
             try:
                 ref = ref or await ch.fetch_message(msg.reference.message_id)
-                if isinstance(ref, discord.Message) and ref.content:
-                    question = f"(replying to {ref.author.display_name}: \"\"\"{ref.content[:MAX_QUOTE]}\"\"\")\n{question}"
+                if isinstance(ref, discord.Message) and (ref.content or ref.attachments):
+                    question = (f"(replying to {ref.author.display_name}: \"\"\"{ref.content[:MAX_QUOTE]}\"\"\""
+                                f"{await read_attachments(ref)})\n{question}")
             except discord.HTTPException:
                 pass
 
@@ -155,7 +180,7 @@ class Bot(discord.Client):
         target: discord.abc.Messageable = ch
         if not in_thread and isinstance(ch, discord.TextChannel) and not replied_to_bot:
             try:
-                target = await msg.create_thread(name=_thread_name(question), auto_archive_duration=1440)
+                target = await msg.create_thread(name=_thread_name(title), auto_archive_duration=1440)
                 sess = self.agent.session(str(target.id))
                 sess.meta["starter"] = msg.author.id
                 self.agent.save_session(sess)
