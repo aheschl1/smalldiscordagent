@@ -281,11 +281,11 @@ async def _review(a, c):
 
 def toolset(level: str, repos: list[str] | None = None) -> tuple[list[dict], dict[str, Impl]]:
     """Tools offered at a permission level. The model never sees tools above the user's level."""
-    from . import apis, artifacts, memory  # late import: these modules use helpers from here
+    from . import apis, artifacts, memory, web  # late import: these modules use helpers from here
     write = level == "write"
     items = (_READ + _WRITE if write else _READ) + artifacts.tools() + linear.tools(write) + apis.tools(repos or [])
     if write:
-        items += memory.tools()
+        items += memory.tools() + web.tools()
     return [s for s, _ in items], {s["name"]: f for s, f in items}
 
 
@@ -305,6 +305,6 @@ async def run_tool(impls: dict[str, Impl], name: str, args: dict, ctx: ToolCtx) 
 def describe(name: str, args: dict) -> str:
     """Short human label for progress updates."""
     key = next((args[k] for k in ("pattern", "path", "number", "title", "search", "query", "issue", "job", "ref",
-                                  "channel", "id") if args.get(k)), "")
+                                  "channel", "id", "url") if args.get(k)), "")
     return f"{name} {str(key)[:60]}".strip()
 
