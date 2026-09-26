@@ -36,10 +36,6 @@ async def get_pr(repo: str, n: int) -> dict:
     return (await _req("GET", f"/repos/{repo}/pulls/{n}")).json()
 
 
-async def get_pr_files(repo: str, n: int) -> list[dict]:
-    return (await _req("GET", f"/repos/{repo}/pulls/{n}/files", params={"per_page": 100})).json()
-
-
 async def create_pr(repo: str, title: str, body: str, head: str, base: str, draft: bool) -> dict:
     payload = {"title": title, "body": body, "head": head, "base": base, "draft": draft}
     return (await _req("POST", f"/repos/{repo}/pulls", json=payload)).json()

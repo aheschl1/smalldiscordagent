@@ -60,6 +60,17 @@ class Worktree:
     tree: str                       # snapshot of the index after the last edit; used for reads
     pr: tuple[int, str] | None = None  # (number, url)
     base: str = ""                  # branch the work started from and the PR targets ("" = default branch)
+    start: str = ""                 # commit the worktree was created from; what `diff` compares edits against
+
+
+@dataclass
+class Focus:
+    """A PR the thread is looking at. Reads without an explicit ref go to `head`, so a review can't
+    silently drift onto the default branch."""
+    pr: int
+    head: str       # PR head commit, refreshed at the start of each turn
+    base_ref: str   # branch the PR targets
+    base: str       # merge-base of head and base_ref: the "before" side of the PR's diff
 
 
 class Repo:
@@ -71,6 +82,7 @@ class Repo:
         self.default_branch = "main"
         self.lock = asyncio.Lock()  # serializes fetch / worktree add+remove / push
         self._last_fetch = 0.0
+        self._pr_fetch: dict[int, float] = {}
 
     def _g(self, *args: str, ok: tuple[int, ...] = (0,)):
         return git("--git-dir", str(self.git_dir), *args, ok=ok)
@@ -101,13 +113,34 @@ class Repo:
         if ref.startswith("-"):
             raise GitError("bad ref")
         if m := re.fullmatch(r"(?:pr/|#)(\d+)", ref):
-            async with self.lock:
-                await self._g("fetch", "-q", "origin", f"+pull/{m[1]}/head:refs/remotes/pr/{m[1]}")
-            ref = f"refs/remotes/pr/{m[1]}"
+            return await self.fetch_pr(int(m[1]))
         for cand in (f"refs/remotes/origin/{ref}", ref):
             if sha := (await self._g("rev-parse", "-q", "--verify", f"{cand}^{{commit}}", ok=(0, 1))).strip():
                 return sha
         raise GitError(f"unknown ref: {ref}")
+
+    async def fetch_pr(self, n: int, force: bool = False) -> str:
+        """Fetch a PR's head (works for forks) and return its sha. Throttled like `fetch`, so a review's many
+        ref=pr/N reads don't each hit the network or see a push land mid-review."""
+        ref = f"refs/remotes/pr/{n}"
+        if force or time.monotonic() - self._pr_fetch.get(n, 0) > 60:
+            async with self.lock:
+                await self._g("fetch", "-q", "origin", f"+pull/{n}/head:{ref}")
+            self._pr_fetch[n] = time.monotonic()
+        return (await self._g("rev-parse", f"{ref}^{{commit}}")).strip()
+
+    async def merge_base(self, a: str, b: str) -> str:
+        return (await self._g("merge-base", a, b)).strip()
+
+    async def diff(self, base: str, head: str, paths: list[str], *, context: int = 3, function: bool = False,
+                   stat: bool = False) -> str:
+        """base/head are commits or trees (a worktree snapshot is a tree)."""
+        args = ["diff", "--no-color", "--no-ext-diff", "-M"]
+        args += ["--stat=200", "--stat-graph-width=10"] if stat else [f"-U{context}", *(["-W"] if function else [])]
+        args += [base, head]
+        if paths:
+            args += ["--", *paths]
+        return await self._g(*args)
 
     async def list_files(self, tree: str) -> list[str]:
         return [f for f in (await self._g("ls-tree", "-r", "--name-only", "-z", tree)).split("\0") if f]
@@ -138,7 +171,7 @@ class Repo:
         async with self.lock:
             await self._g("worktree", "add", "-q", "-b", branch, str(d), base)
         tree = (await git("rev-parse", "HEAD^{tree}", cwd=d)).strip()
-        return Worktree(d, branch, tree, base=base_branch)
+        return Worktree(d, branch, tree, base=base_branch, start=base)
 
     async def remove_worktree(self, wt: Worktree) -> None:
         async with self.lock:

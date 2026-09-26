@@ -6,15 +6,14 @@ permission, so the permission boundary is enforced by capability, not by prompt.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import github as gh
 from . import linear
-from .gitrepo import GitError, Repo, Worktree, git, safe_path, snapshot
+from .gitrepo import Focus, GitError, Repo, Worktree, git, safe_path, snapshot
 
 log = logging.getLogger("tools")
 
@@ -33,6 +32,7 @@ class ToolCtx:
     user_id: int = 0
     # Asks the requesting user to approve a dangerous action (Discord button). None = can't ask, so deny.
     confirm: Callable[[str], Awaitable[bool]] | None = None
+    focus: dict[str, Focus] = field(default_factory=dict)  # this thread's PR under review, keyed by repo
 
 
 Impl = Callable[[dict, ToolCtx], Awaitable[str]]
@@ -40,7 +40,8 @@ _READ: list[tuple[dict, Impl]] = []
 _WRITE: list[tuple[dict, Impl]] = []
 
 REPO = {"repo": {"type": "string", "description": "owner/name; omit for default"}}
-REF = {"ref": {"type": "string", "description": "branch, tag, sha, or pr/N; omit for default branch"}}
+REF = {"ref": {"type": "string", "description": "branch, tag, sha, pr/N, or base (the focused PR's merge-base); "
+                                                "omit for the current view"}}
 BASE = {"base": {"type": "string", "description": "branch to start from and target with the PR; first edit only; "
                                                   "default: default branch"}}
 
@@ -71,16 +72,42 @@ def repo_of(c: ToolCtx, a: dict) -> Repo:
     return c.repos[name]
 
 
-async def tree_of(c: ToolCtx, a: dict) -> tuple[Repo, str]:
-    """Tree-ish to read: explicit ref > this thread's worktree (edits visible) > pinned default branch."""
-    r = repo_of(c, a)
-    if a.get("ref"):
-        return r, await r.resolve(a["ref"])
-    if wt := c.worktrees.get(r.name):
-        return r, wt.tree
+async def pinned_of(c: ToolCtx, r: Repo) -> str:
     if r.name not in c.pinned:
         c.pinned[r.name] = await r.resolve()
-    return r, c.pinned[r.name]
+    return c.pinned[r.name]
+
+
+async def resolve_ref(c: ToolCtx, r: Repo, ref: str) -> tuple[str, str]:
+    """(sha, label) for an explicit ref. `base` means the focused PR's merge-base."""
+    f = c.focus.get(r.name)
+    if ref.strip().lower() == "base":
+        if not f:
+            raise ValueError("ref=base needs a focused PR; call pr first")
+        return f.base, f"base of pr/{f.pr} ({f.base_ref}) {f.base[:8]}"
+    if f and ref.strip().lstrip("#").removeprefix("pr/") == str(f.pr):
+        return f.head, f"pr/{f.pr} {f.head[:8]}"
+    sha = await r.resolve(ref)
+    return sha, f"{ref} {sha[:8]}"
+
+
+async def view(c: ToolCtx, a: dict, edits: bool = True) -> tuple[Repo, str, str]:
+    """(repo, tree-ish, label) to read. Explicit ref > focused PR > this thread's worktree (edits visible) >
+    pinned default branch. Whichever of the PR and the worktree the thread touched last is the focus
+    (`pr` sets it, an edit clears it). The label goes on every result so the model sees what it read."""
+    r = repo_of(c, a)
+    if a.get("ref"):
+        return r, *await resolve_ref(c, r, a["ref"])
+    if f := c.focus.get(r.name):
+        return r, f.head, f"pr/{f.pr} {f.head[:8]}"
+    if edits and (wt := c.worktrees.get(r.name)):
+        return r, wt.tree, f"your edits on {wt.branch}"
+    sha = await pinned_of(c, r)
+    return r, sha, f"{r.default_branch} {sha[:8]}"
+
+
+def at(label: str, body: str) -> str:
+    return f"[@ {label}]\n{body}"
 
 
 def pathspec(p: str | None) -> str | None:
@@ -112,20 +139,20 @@ def compact_tree(files: list[str], prefix: str, depth: int, limit: int = 300) ->
 @tool(_READ, "ls", "List files. Deeper dirs collapse to 'dir/ (count)'.",
       {**REPO, "path": {"type": "string"}, "depth": {"type": "integer", "description": "default 2"}, **REF})
 async def _ls(a, c):
-    r, t = await tree_of(c, a)
-    return compact_tree(await r.list_files(t), a.get("path") or "", int(a.get("depth") or 2))
+    r, t, label = await view(c, a)
+    return at(label, compact_tree(await r.list_files(t), a.get("path") or "", int(a.get("depth") or 2)))
 
 
 @tool(_READ, "read", "Read a file with line numbers. Default: 250 lines from start.",
       {**REPO, "path": {"type": "string"}, "start": {"type": "integer"}, "end": {"type": "integer"}, **REF},
       ("path",))
 async def _read(a, c):
-    r, t = await tree_of(c, a)
+    r, t, label = await view(c, a)
     lines = (await r.show(t, a["path"].lstrip("/").removeprefix("./"))).split("\n")
     s = max(1, int(a.get("start") or 1))
     e = min(len(lines), int(a.get("end") or s + 249))
     body = "\n".join(f"{s + i}\t{clip(l, 400)}" for i, l in enumerate(lines[s - 1:e]))
-    return body + (f"\n[lines {s}-{e} of {len(lines)}]" if e < len(lines) or s > 1 else "")
+    return at(label, body + (f"\n[lines {s}-{e} of {len(lines)}]" if e < len(lines) or s > 1 else ""))
 
 
 @tool(_READ, "grep", "Regex (ERE) search. Returns path:line:text.",
@@ -134,55 +161,110 @@ async def _read(a, c):
        "ignore_case": {"type": "boolean"}, **REF},
       ("pattern",))
 async def _grep(a, c):
-    r, t = await tree_of(c, a)
+    r, t, label = await view(c, a)
     hits = await r.grep(t, a["pattern"], pathspec(a.get("path")), bool(a.get("ignore_case")))
     if not hits:
-        return "no matches"
+        return at(label, "no matches")
     limit = 60
     out = "\n".join(clip(h, 240) for h in hits[:limit])
     if len(hits) > limit:
         files = len({h.split(":", 1)[0] for h in hits})
         out += f"\n…{len(hits) - limit} more matches across {files} files; narrow pattern/path"
-    return out
+    return at(label, out)
 
 
 @tool(_READ, "log", "Commit history. `search` finds commits that added/removed that string (when did X change).",
       {**REPO, "path": {"type": "string"}, "search": {"type": "string"},
        "n": {"type": "integer", "description": "default 15"}, **REF})
 async def _log(a, c):
-    r = repo_of(c, a)
-    out = await r.log(await r.resolve(a.get("ref")), min(int(a.get("n") or 15), 50), a.get("path"), a.get("search"))
-    return out or "no commits"
+    r, sha, label = await view(c, a, edits=False)
+    out = await r.log(sha, min(int(a.get("n") or 15), 50), a.get("path"), a.get("search"))
+    return at(label, out or "no commits")
 
 
-@tool(_READ, "pr", "Pull request: metadata, changed files, patches. `file` gets one file's full patch. "
-      "Read PR code with ref=pr/N.",
-      {**REPO, "number": {"type": "integer"}, "file": {"type": "string"}}, ("number",))
+@tool(_READ, "pr", "Pull request metadata and diff. Makes this PR the thread's view: later reads without ref "
+      "see its code; ref=base reads the code it changes from. Use `diff` for the rest of a large diff.",
+      {**REPO, "number": {"type": "integer"}}, ("number",))
 async def _pr(a, c):
     r = repo_of(c, a)
     n = int(a["number"])
-    p, files = await asyncio.gather(gh.get_pr(r.name, n), gh.get_pr_files(r.name, n))
-    if f := a.get("file"):
-        hit = next((x for x in files if x["filename"] == f), None) or next((x for x in files if f in x["filename"]), None)
-        if not hit:
-            return "no such file in PR. Files: " + ", ".join(x["filename"] for x in files)
-        return cap(f"{hit['filename']}\n{hit.get('patch') or '(no textual patch)'}", c.max_out)
+    p = await gh.get_pr(r.name, n)
+    f = await focus_pr(r, n, p)
+    c.focus[r.name] = f
     state = "merged" if p.get("merged") else p["state"]
     out = (f"#{p['number']} \"{p['title']}\" by {p['user']['login']} [{state}{', draft' if p.get('draft') else ''}] "
-           f"{p['base']['ref']} <- {p['head']['ref']} ({p['head']['sha'][:8]}), +{p['additions']} -{p['deletions']}\n"
-           f"{cap(p.get('body') or '', 1500)}\n\nfiles:\n"
-           + "\n".join(f"{x['status'][0].upper()} {x['filename']} +{x['additions']} -{x['deletions']}" for x in files)
-           + "\n")
-    omitted = []
-    for x in files:
-        chunk = f"\n--- {x['filename']}\n{x.get('patch') or '(binary/large)'}\n"
-        if len(out) + len(chunk) > c.max_out:
-            omitted.append(x["filename"])
-        else:
-            out += chunk
-    if omitted:
-        out += "\n[patches omitted, fetch with file=: " + ", ".join(omitted) + "]"
-    return out
+           f"{p['base']['ref']} <- {p['head']['ref']}, +{p['additions']} -{p['deletions']}\n"
+           f"{cap(p.get('body') or '', 1500)}\n\n")
+    return out + await render_diff(c, r, f.base, f.head, f"pr/{n} {f.head[:8]} vs base {f.base[:8]} ({f.base_ref})",
+                                   [], 3, False, 1, c.max_out - len(out))
+
+
+async def focus_pr(r: Repo, n: int, p: dict | None = None) -> Focus:
+    p = p or await gh.get_pr(r.name, n)
+    head = await r.fetch_pr(n, force=True)
+    base_ref = p["base"]["ref"]
+    try:
+        tip = await r.resolve(base_ref)
+    except GitError:  # base branch deleted since
+        tip = await r.resolve()
+    return Focus(n, head, base_ref, await r.merge_base(head, tip))
+
+
+async def render_diff(c: ToolCtx, r: Repo, base: str, head: str, label: str, paths: list[str], context: int,
+                      function: bool, start: int, budget: int) -> str:
+    """Stat (on the first page of a whole diff) then patch lines from `start`, paged to fit `budget`."""
+    head_s = f"[@ diff {label}]\n"
+    if start <= 1 and not paths:
+        stat = await r.diff(base, head, [], stat=True)
+        head_s += (stat.strip() or "(no changes)") + "\n"
+        if not stat.strip():
+            return head_s
+    lines = (await r.diff(base, head, paths, context=context, function=function)).splitlines()
+    if not lines:
+        return head_s + "(no changes)"
+    room = budget - len(head_s) - 200
+    i, used, out = max(1, start) - 1, 0, []
+    while i < len(lines) and used + len(lines[i]) + 1 <= room:
+        out.append(clip(lines[i], 400))
+        used += len(out[-1]) + 1
+        i += 1
+    s0 = max(1, start)
+    more = (f"\n[diff lines {s0}-{i} of {len(lines)}; continue with start={i + 1}, or pass path= for one file]"
+            if i < len(lines) else (f"\n[diff lines {s0}-{i} of {len(lines)}]" if s0 > 1 else ""))
+    return head_s + "\n".join(out) + more
+
+
+@tool(_READ, "diff", "Diff between two refs. Defaults: the focused PR against its merge-base, or your edits against "
+      "where they started. `path` narrows to files/dirs; `function` shows whole changed functions; page with `start`.",
+      {**REPO, "path": {"type": "string", "description": "file, dir, or glob; comma-separate several"},
+       "ref": {"type": "string", "description": "new side: branch, sha, pr/N"},
+       "base": {"type": "string", "description": "old side; default: merge-base with the default branch"},
+       "context": {"type": "integer", "description": "context lines, default 3"},
+       "function": {"type": "boolean"},
+       "start": {"type": "integer", "description": "diff line to start from, for paging"}})
+async def _diff(a, c):
+    r = repo_of(c, a)
+    f, wt = c.focus.get(r.name), c.worktrees.get(r.name)
+    if a.get("ref") and (m := re.fullmatch(r"(?:pr/|#)(\d+)", a["ref"].strip())) and not (f and f.pr == int(m[1])):
+        g = await focus_pr(r, int(m[1]))  # another PR: diff against its own base, without switching the view
+        head, base, label = g.head, g.base, f"pr/{g.pr} {g.head[:8]}"
+    elif a.get("ref"):
+        head, label = await resolve_ref(c, r, a["ref"])
+        base = f.base if f and head == f.head else await r.merge_base(head, await pinned_of(c, r))
+    elif f:
+        head, base, label = f.head, f.base, f"pr/{f.pr} {f.head[:8]}"
+    elif wt:
+        head, label = wt.tree, f"your edits on {wt.branch}"
+        base = wt.start or await r.merge_base((await git("rev-parse", "HEAD", cwd=wt.dir)).strip(),
+                                              await pinned_of(c, r))
+    else:
+        return "error: nothing to diff; call pr first, or pass ref"
+    if a.get("base"):
+        base, _ = await resolve_ref(c, r, a["base"])
+    paths = [q for x in (a.get("path") or "").split(",") if (q := pathspec(x.strip()))]
+    return await render_diff(c, r, base, head, f"{label} vs {base[:8]}", paths,
+                             max(0, min(int(a.get("context") or 3), 50)), bool(a.get("function")),
+                             int(a.get("start") or 1), c.max_out)
 
 
 _TS = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+Z\s?")
@@ -201,17 +283,18 @@ async def _ci(a, c):
         excerpt = "\n".join(clip(lines[i]) for i in sorted(picked)) or "(none matched)"
         tail = "\n".join(clip(l) for l in lines[-30:])
         return cap(f"== error lines ==\n{excerpt}\n== tail ==\n{tail}", c.max_out)
-    sha = await r.resolve(a.get("ref"))
+    r, sha, label = await view(c, a, edits=False)
     runs = await gh.get_check_runs(r.name, sha)
     if not runs:
-        return f"no checks on {sha[:8]}"
-    return "\n".join(f"{x['id']} {x['name']}: {x.get('conclusion') or x['status']}" for x in runs)
+        return at(label, "no checks")
+    return at(label, "\n".join(f"{x['id']} {x['name']}: {x.get('conclusion') or x['status']}" for x in runs))
 
 
 # ---------------------------------------------------------------- write tools
 
 async def worktree_for(c: ToolCtx, a: dict) -> Worktree:
     r = repo_of(c, a)
+    c.focus.pop(r.name, None)  # editing: reads should now see the edits, not a PR under review
     if r.name not in c.worktrees:
         branch = (a.get("base") or "").strip()
         if branch and branch != r.default_branch:
