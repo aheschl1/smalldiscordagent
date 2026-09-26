@@ -137,7 +137,9 @@ class Bot(discord.Client):
         if not (self.state.channel_allowed(ch.id, parent_id) or listening):
             return
 
-        mentioned = self.user in msg.mentions
+        # Typing "@Computa" often autocompletes to the bot's managed role rather than the bot user.
+        own_role = msg.guild.self_role
+        mentioned = self.user in msg.mentions or (own_role is not None and own_role in msg.role_mentions)
         ref = msg.reference.resolved if msg.reference else None  # gateway usually includes the replied-to message
         replied_to_bot = isinstance(ref, discord.Message) and ref.author.id == self.user.id
         addressed = mentioned or replied_to_bot or not self.state.s["require_mention"]
@@ -158,7 +160,7 @@ class Bot(discord.Client):
                 await msg.reply("You don't have access to this bot.", mention_author=False)
             return
 
-        question = re.sub(rf"<@!?{self.user.id}>", "", msg.content).strip()
+        question = re.sub(rf"<@!?{self.user.id}>|<@&{own_role.id if own_role else 0}>", "", msg.content).strip()
         if not question and not msg.attachments:
             if mentioned:
                 await msg.reply("Ask me something about the code.", mention_author=False)

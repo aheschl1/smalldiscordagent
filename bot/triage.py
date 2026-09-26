@@ -41,8 +41,9 @@ QUESTIONS = {
     },
     "to_person": {
         "type": "noul",
-        "instructions": "The LATEST message is directed at a specific person (by name, @mention, or as a direct "
-                        "reply to them) rather than asked to the group",
+        "instructions": "The LATEST message is directed at a specific human (by name, @mention, or as a direct "
+                        "reply to them) rather than asked to the group. Messages addressed to the bot "
+                        "('computa') don't count",
     },
 }
 
